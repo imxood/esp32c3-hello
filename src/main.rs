@@ -1,20 +1,20 @@
 use std::io::Read;
-use std::io::Write;
+use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
 use embedded_svc::ipv4;
-use embedded_svc::wifi::AccessPointConfiguration;
 use embedded_svc::wifi::ClientConfiguration;
 use embedded_svc::wifi::Configuration;
 use embedded_svc::wifi::Wifi;
 use esp_idf_hal::gpio::*;
 use esp_idf_hal::peripheral;
 use esp_idf_hal::peripherals::Peripherals;
+use esp_idf_svc::eventloop::EspEventLoop;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::eventloop::System;
 use esp_idf_svc::netif::*;
 use esp_idf_svc::ping;
 use esp_idf_svc::wifi::EspWifi;
@@ -23,6 +23,7 @@ use log::*;
 
 const SSID: &str = "maxu";
 const PASS: &str = "mx123456";
+const SERVER: &str = "192.168.3.118:1090";
 
 fn main() {
     std::env::set_var("RUST_BACKTRACE", "1");
@@ -33,20 +34,18 @@ fn main() {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     let peripherals = Peripherals::take().unwrap();
-
     let sysloop = EspSystemEventLoop::take().unwrap();
 
-    let _ = wifi(peripherals.modem, sysloop.clone()).unwrap();
+    // 连接 wifi, 并连接 tcp server
+    {
+        let modem = peripherals.modem;
+        let sysloop_a = sysloop.clone();
 
-    test_tcp().unwrap();
+        tcp_service(modem, sysloop_a);
+    }
 
-    let mut button = PinDriver::input(peripherals.pins.gpio9).unwrap();
-
-    button.set_pull(Pull::Down).unwrap();
-
-    std::thread::spawn(|| loop {
+    std::thread::spawn(|| {
         println!("Hello, world! {:?}", std::thread::current());
-        std::thread::sleep(Duration::from_millis(1000));
     });
 
     println!("Hello, world!");
@@ -80,19 +79,12 @@ fn wifi(
         None
     };
 
-    wifi.set_configuration(&Configuration::Mixed(
-        ClientConfiguration {
-            ssid: SSID.into(),
-            password: PASS.into(),
-            channel,
-            ..Default::default()
-        },
-        AccessPointConfiguration {
-            ssid: "aptest".into(),
-            channel: channel.unwrap_or(1),
-            ..Default::default()
-        },
-    ))?;
+    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
+        ssid: SSID.into(),
+        password: PASS.into(),
+        channel,
+        ..Default::default()
+    }))?;
 
     wifi.start()?;
 
@@ -120,11 +112,9 @@ fn wifi(
 
     let ip_info = wifi.sta_netif().get_ip_info()?;
 
+    ping(ip_info.subnet.gateway).unwrap();
+
     info!("Wifi DHCP info: {:?}", ip_info);
-
-    ping(ip_info.subnet.gateway)?;
-
-    ping("192.168.3.118".parse().unwrap())?;
 
     Ok(wifi)
 }
@@ -132,7 +122,13 @@ fn wifi(
 fn ping(ip: ipv4::Ipv4Addr) -> Result<()> {
     info!("About to do some pings for {:?}", ip);
 
-    let ping_summary = ping::EspPing::default().ping(ip, &Default::default())?;
+    let ping_summary = ping::EspPing::default().ping(
+        ip,
+        &embedded_svc::ping::Configuration {
+            count: 3,
+            ..Default::default()
+        },
+    )?;
     if ping_summary.transmitted != ping_summary.received {
         bail!("Pinging IP {} resulted in timeouts", ip);
     }
@@ -142,27 +138,49 @@ fn ping(ip: ipv4::Ipv4Addr) -> Result<()> {
     Ok(())
 }
 
-fn test_tcp() -> Result<()> {
-    let addr = "192.168.3.118:1090";
-    info!("About to open a TCP connection to {}", addr);
+fn tcp_service(modem: esp_idf_hal::modem::Modem, sysloop_a: EspEventLoop<System>) {
+    std::thread::Builder::new()
+        .name("tcp_server".into())
+        .stack_size(4096)
+        .spawn(move || {
+            let _wifi = wifi(modem, sysloop_a).unwrap();
+            let mut buf = Vec::new();
+            let server_addr = match SERVER.parse() {
+                Ok(addr) => SocketAddr::V4(addr),
+                Err(e) => {
+                    error!("server addr format wrong, e: {:?}", e);
+                    return;
+                }
+            };
 
-    match TcpStream::connect(addr) {
-        Ok(mut stream) => {
-            info!("1");
-            stream.write_all("hello world\n\n".as_bytes())?;
+            loop {
+                info!("be ready to open a tcp connection to {}", SERVER);
 
-            info!("2");
-
-            let mut result = Vec::new();
-
-            let size = stream.read_to_end(&mut result)?;
-            info!("recv: {:?}", &result[..size]);
-
-            Ok(())
-        }
-        Err(e) => {
-            error!("connect failed, e: {:?}", &e);
-            Err(anyhow!(e))
-        }
-    }
+                match TcpStream::connect_timeout(&server_addr, Duration::from_secs(1)) {
+                    Ok(mut stream) => {
+                        info!("connected to {}", SERVER);
+                        loop {
+                            match stream.read(&mut buf) {
+                                Ok(size) => {
+                                    if size == 0 {
+                                        break;
+                                    }
+                                    info!("recv: {:?}", &buf[..size]);
+                                }
+                                Err(e) => {
+                                    error!("read failed, e: {:?}", e);
+                                    break;
+                                }
+                            }
+                        }
+                        info!("disconnected from {}", SERVER);
+                    }
+                    Err(e) => {
+                        error!("connect failed, e: {:?}", &e);
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        })
+        .unwrap();
 }
