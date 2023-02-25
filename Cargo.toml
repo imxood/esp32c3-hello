@@ -13,6 +13,10 @@ debug = true    # Symbols are nice and they don't increase the size on Flash
 opt-level = "z"
 
 [features]
+default = ["oled", "ec11"]
+oled = []
+ec11 = []
+wifi = []
 
 [dependencies]
 critical-section = "1.1.1"
@@ -22,7 +26,8 @@ esp-idf-hal = "0.40"
 embedded-svc = "0.24.0"
 log = "0.4.17"
 anyhow = "1.0.69"
-
+ssd1306 = "0.7.1"
+embedded-graphics = "0.7.1"
 
 [build-dependencies]
 embuild = "0.31"

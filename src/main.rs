@@ -1,11 +1,8 @@
 use esp_idf_hal::gpio::*;
 use esp_idf_hal::peripherals::Peripherals;
-use esp_idf_svc::eventloop::EspSystemEventLoop;
-
-use crate::ec11::ec11_service;
-use crate::wifi::tcp_service;
 
 mod ec11;
+mod oled;
 mod wifi;
 
 fn main() {
@@ -16,22 +13,46 @@ fn main() {
 
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    let Peripherals { pins, modem, .. } = Peripherals::take().unwrap();
+    let Peripherals {
+        pins, modem, i2c0, ..
+    } = Peripherals::take().unwrap();
 
     let Pins {
+        // ec11 key
+        gpio2,
+        // ec11 a
+        gpio3,
+        // ec11 b
+        gpio4,
+        // oled sda
         gpio5,
+        // oled scl
         gpio6,
-        gpio7,
         ..
     } = pins;
 
-    let sysloop = EspSystemEventLoop::take().unwrap();
-
     // 连接 wifi, 并连接 tcp server
-    tcp_service(sysloop.clone(), modem);
+    #[cfg(feature = "wifi")]
+    {
+        use esp_idf_svc::eventloop::EspSystemEventLoop;
+        let sysloop = EspSystemEventLoop::take().unwrap();
+        use crate::wifi::tcp_service;
+        tcp_service(sysloop.clone(), modem);
+    }
 
     // ec11 编码器: A B
-    ec11_service(gpio5, gpio6, gpio7);
+    #[cfg(feature = "ec11")]
+    {
+        use crate::ec11::ec11_service;
+        ec11_service(gpio2, gpio3, gpio4);
+    }
+
+    // oled 显示屏
+    #[cfg(feature = "oled")]
+    {
+        use crate::oled::oled_service;
+        oled_service(i2c0, gpio5, gpio6);
+    }
 
     println!("Hello, world!");
 }
